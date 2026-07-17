@@ -1,0 +1,15 @@
+{
+  "name": "telegram-hot-pack-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bot Telegram com checkout InfinitePay, confirmação por webhook e entrega em canal privado.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "check": "node --check src/index.js && node --check src/bot.js && node --check src/server.js && node --check src/payment-worker.js && node --check src/telegram.js"
+  }
+}
