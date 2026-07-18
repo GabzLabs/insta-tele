@@ -1,15 +1,18 @@
 {
-  "name": "telegram-hot-pack-bot",
-  "version": "1.0.0",
+  "name": "telegram-hot-pack-bot-efi",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Bot Telegram com checkout InfinitePay, confirmação por webhook e entrega em canal privado.",
+  "description": "Bot Telegram com Pix Efí, confirmação automática e entrega em canal privado.",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
-    "start": "node src/index.js",
+    "start": "base64 -d /etc/secrets/producao.p12.base64 > /tmp/producao.p12 && node src/index.js",
     "dev": "node --watch src/index.js",
-    "check": "node --check src/index.js && node --check src/bot.js && node --check src/server.js && node --check src/payment-worker.js && node --check src/telegram.js"
+    "check": "node --check src/index.js && node --check src/bot.js && node --check src/server.js && node --check src/efi.js && node --check src/db.js"
+  },
+  "dependencies": {
+    "sdk-node-apis-efi": "^2.0.0"
   }
 }

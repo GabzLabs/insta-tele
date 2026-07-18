@@ -1,6 +1,8 @@
 node_modules/
 .env
-data/store.json
-data/store.json.tmp
+certs/*.p12
+certs/*.pem
+data/*.json
 npm-debug.log*
 .DS_Store
+certificado_base64.txt

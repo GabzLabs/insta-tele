@@ -2,127 +2,216 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 
-const dataDirectory = path.dirname(config.dataFile);
-fs.mkdirSync(dataDirectory, { recursive: true });
+const absoluteDataFile = path.resolve(config.dataFile);
 
-const initialState = () => ({
-  version: 1,
-  nextEventId: 1,
-  users: {},
-  orders: {},
-  paymentEvents: {}
+fs.mkdirSync(path.dirname(absoluteDataFile), {
+  recursive: true
 });
 
-function readState() {
-  if (!fs.existsSync(config.dataFile)) {
-    const fresh = initialState();
-    persistState(fresh);
-    return fresh;
-  }
-
-  try {
-    const raw = fs.readFileSync(config.dataFile, "utf8");
-    const parsed = JSON.parse(raw);
-    return {
-      ...initialState(),
-      ...parsed,
-      users: parsed.users ?? {},
-      orders: parsed.orders ?? {},
-      paymentEvents: parsed.paymentEvents ?? {}
-    };
-  } catch (error) {
-    throw new Error(`Não foi possível ler ${config.dataFile}: ${error.message}`);
-  }
+function freshDatabase() {
+  return {
+    version: 2,
+    users: {},
+    orders: {},
+    paymentEvents: {},
+    nextEventId: 1
+  };
 }
 
-function persistState(nextState) {
-  const tempPath = `${config.dataFile}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(nextState, null, 2), "utf8");
-  fs.renameSync(tempPath, config.dataFile);
-}
+let state = loadDatabase();
 
-let state = readState();
-const now = () => new Date().toISOString();
-
-function mutate(mutator) {
-  mutator(state);
-  persistState(state);
+function now() {
+  return new Date().toISOString();
 }
 
 function clone(value) {
-  return value == null ? value : structuredClone(value);
+  return value == null
+    ? value
+    : structuredClone(value);
 }
 
-export function upsertUser({ telegramId, username, firstName, ageConfirmed = 0 }) {
+function loadDatabase() {
+  if (!fs.existsSync(absoluteDataFile)) {
+    const database = freshDatabase();
+    persist(database);
+    return database;
+  }
+
+  try {
+    const database = JSON.parse(
+      fs.readFileSync(absoluteDataFile, "utf8")
+    );
+
+    return {
+      ...freshDatabase(),
+      ...database,
+      users: database.users ?? {},
+      orders: database.orders ?? {},
+      paymentEvents: database.paymentEvents ?? {}
+    };
+  } catch (error) {
+    throw new Error(
+      `Falha ao ler banco de dados: ${error.message}`
+    );
+  }
+}
+
+function persist(database) {
+  const temporaryFile = `${absoluteDataFile}.tmp`;
+
+  fs.writeFileSync(
+    temporaryFile,
+    JSON.stringify(database, null, 2)
+  );
+
+  fs.renameSync(temporaryFile, absoluteDataFile);
+}
+
+function mutate(callback) {
+  callback(state);
+  persist(state);
+}
+
+export function upsertUser({
+  telegramId,
+  username,
+  firstName
+}) {
   const id = String(telegramId);
   const timestamp = now();
-  mutate((draft) => {
-    const current = draft.users[id];
-    draft.users[id] = {
+
+  mutate((database) => {
+    const previous = database.users[id];
+
+    database.users[id] = {
       telegram_id: id,
-      username: username ?? current?.username ?? null,
-      first_name: firstName ?? current?.first_name ?? null,
-      age_confirmed: current?.age_confirmed ?? ageConfirmed,
-      created_at: current?.created_at ?? timestamp,
+
+      username:
+        username ??
+        previous?.username ??
+        null,
+
+      first_name:
+        firstName ??
+        previous?.first_name ??
+        null,
+
+      age_confirmed:
+        previous?.age_confirmed ?? 0,
+
+      created_at:
+        previous?.created_at ?? timestamp,
+
       updated_at: timestamp
     };
   });
 }
 
 export function confirmAge(telegramId) {
-  const id = String(telegramId);
-  mutate((draft) => {
-    if (!draft.users[id]) return;
-    draft.users[id].age_confirmed = 1;
-    draft.users[id].updated_at = now();
+  mutate((database) => {
+    const user =
+      database.users[String(telegramId)];
+
+    if (!user) {
+      return;
+    }
+
+    user.age_confirmed = 1;
+    user.updated_at = now();
   });
 }
 
 export function getUser(telegramId) {
-  return clone(state.users[String(telegramId)] ?? null);
+  return clone(
+    state.users[String(telegramId)] ?? null
+  );
 }
 
-export function createOrder({ orderNsu, telegramId, amountCents, title }) {
+export function createOrder({
+  orderNsu,
+  telegramId,
+  amountCents,
+  title
+}) {
   const timestamp = now();
-  mutate((draft) => {
-    if (draft.orders[orderNsu]) throw new Error("Pedido duplicado.");
-    draft.orders[orderNsu] = {
+
+  mutate((database) => {
+    database.orders[orderNsu] = {
       order_nsu: orderNsu,
       telegram_id: String(telegramId),
       amount_cents: amountCents,
       title,
+
       status: "PENDING",
-      checkout_url: null,
-      transaction_nsu: null,
-      invoice_slug: null,
-      receipt_url: null,
-      capture_method: null,
+
+      txid: null,
+      location_id: null,
+      pix_copy_paste: null,
+      qr_data_url: null,
+      visualization_url: null,
+
+      expires_at: null,
+
+      end_to_end_id: null,
+      paid_at: null,
+
       invite_link: null,
       invite_expires_at: null,
       invite_notified_at: null,
-      paid_at: null,
       joined_at: null,
+
       created_at: timestamp,
       updated_at: timestamp
     };
   });
+
   return getOrder(orderNsu);
 }
 
-export function setCheckoutUrl(orderNsu, checkoutUrl) {
-  mutate((draft) => {
-    const order = draft.orders[orderNsu];
-    if (!order) throw new Error("Pedido não encontrado.");
-    order.checkout_url = checkoutUrl;
+export function attachPix(orderNsu, pix) {
+  mutate((database) => {
+    const order = database.orders[orderNsu];
+
+    if (!order) {
+      throw new Error("Pedido não encontrado.");
+    }
+
+    Object.assign(order, {
+      txid: pix.txid,
+      location_id: pix.locationId,
+      pix_copy_paste: pix.pixCopyPaste,
+      qr_data_url: pix.qrDataUrl,
+      visualization_url: pix.visualizationUrl,
+      expires_at: pix.expiresAt,
+      updated_at: now()
+    });
+  });
+
+  return getOrder(orderNsu);
+}
+
+export function setOrderFailed(orderNsu) {
+  mutate((database) => {
+    const order = database.orders[orderNsu];
+
+    if (!order) {
+      return;
+    }
+
+    order.status = "FAILED";
     order.updated_at = now();
   });
 }
 
-export function setOrderFailed(orderNsu) {
-  mutate((draft) => {
-    const order = draft.orders[orderNsu];
-    if (!order) return;
-    order.status = "FAILED";
+export function markExpired(orderNsu) {
+  mutate((database) => {
+    const order = database.orders[orderNsu];
+
+    if (order?.status !== "PENDING") {
+      return;
+    }
+
+    order.status = "EXPIRED";
     order.updated_at = now();
   });
 }
@@ -131,157 +220,218 @@ export function getOrder(orderNsu) {
   return clone(state.orders[orderNsu] ?? null);
 }
 
+export function getOrderByTxid(txid) {
+  const order = Object.values(state.orders)
+    .find((item) => item.txid === txid);
+
+  return clone(order ?? null);
+}
+
 export function getLatestPendingOrder(telegramId) {
-  return clone(
-    Object.values(state.orders)
-      .filter(
-        (order) =>
-          order.telegram_id === String(telegramId) &&
-          order.status === "PENDING" &&
-          order.checkout_url
-      )
-      .sort((a, b) => b.created_at.localeCompare(a.created_at))[0] ?? null
-  );
+  const order = Object.values(state.orders)
+    .filter((item) => {
+      return (
+        item.telegram_id === String(telegramId) &&
+        item.status === "PENDING" &&
+        item.txid
+      );
+    })
+    .sort((a, b) =>
+      b.created_at.localeCompare(a.created_at)
+    )[0];
+
+  return clone(order ?? null);
 }
 
 export function getActiveOrder(telegramId) {
-  return clone(
-    Object.values(state.orders)
-      .filter(
-        (order) =>
-          order.telegram_id === String(telegramId) &&
-          ["PAID", "DELIVERED"].includes(order.status)
-      )
-      .sort((a, b) => b.created_at.localeCompare(a.created_at))[0] ?? null
-  );
+  const order = Object.values(state.orders)
+    .filter((item) => {
+      return (
+        item.telegram_id === String(telegramId) &&
+        ["PAID", "DELIVERED"].includes(item.status)
+      );
+    })
+    .sort((a, b) =>
+      b.created_at.localeCompare(a.created_at)
+    )[0];
+
+  return clone(order ?? null);
 }
 
 export function markOrderPaid({
   orderNsu,
-  transactionNsu,
-  invoiceSlug,
-  receiptUrl,
-  captureMethod
+  endToEndId,
+  paidAt
 }) {
-  const duplicateTransaction = Object.values(state.orders).find(
-    (order) =>
-      order.transaction_nsu === transactionNsu && order.order_nsu !== orderNsu
-  );
-  if (duplicateTransaction) throw new Error("Transação já vinculada a outro pedido.");
+  mutate((database) => {
+    const order = database.orders[orderNsu];
 
-  mutate((draft) => {
-    const order = draft.orders[orderNsu];
-    if (!order) throw new Error("Pedido não encontrado.");
-    const timestamp = now();
-    if (order.status !== "DELIVERED") order.status = "PAID";
-    order.transaction_nsu = transactionNsu;
-    order.invoice_slug = invoiceSlug;
-    order.receipt_url = receiptUrl ?? null;
-    order.capture_method = captureMethod;
-    order.paid_at = order.paid_at ?? timestamp;
-    order.updated_at = timestamp;
+    if (!order) {
+      throw new Error("Pedido não encontrado.");
+    }
+
+    if (order.status !== "DELIVERED") {
+      order.status = "PAID";
+    }
+
+    order.end_to_end_id =
+      order.end_to_end_id ?? endToEndId;
+
+    order.paid_at =
+      order.paid_at ?? paidAt;
+
+    order.updated_at = now();
   });
+
   return getOrder(orderNsu);
 }
 
-export function setInvite(orderNsu, inviteLink, inviteExpiresAt) {
-  const duplicateInvite = Object.values(state.orders).find(
-    (order) => order.invite_link === inviteLink && order.order_nsu !== orderNsu
-  );
-  if (duplicateInvite) throw new Error("Convite já vinculado a outro pedido.");
+export function setInvite(
+  orderNsu,
+  inviteLink,
+  expiresAt
+) {
+  mutate((database) => {
+    const order = database.orders[orderNsu];
 
-  mutate((draft) => {
-    const order = draft.orders[orderNsu];
-    if (!order) throw new Error("Pedido não encontrado.");
+    if (!order) {
+      throw new Error("Pedido não encontrado.");
+    }
+
     order.invite_link = inviteLink;
-    order.invite_expires_at = inviteExpiresAt;
+    order.invite_expires_at = expiresAt;
     order.invite_notified_at = null;
     order.updated_at = now();
   });
+
   return getOrder(orderNsu);
 }
 
 export function markInviteNotified(orderNsu) {
-  mutate((draft) => {
-    const order = draft.orders[orderNsu];
-    if (!order) return;
-    const timestamp = now();
-    order.invite_notified_at = timestamp;
-    order.updated_at = timestamp;
+  mutate((database) => {
+    const order = database.orders[orderNsu];
+
+    if (!order) {
+      return;
+    }
+
+    order.invite_notified_at = now();
+    order.updated_at = now();
   });
 }
 
 export function getOrderByInvite(inviteLink) {
-  return clone(
-    Object.values(state.orders).find((order) => order.invite_link === inviteLink) ?? null
-  );
+  const order = Object.values(state.orders)
+    .find((item) => {
+      return item.invite_link === inviteLink;
+    });
+
+  return clone(order ?? null);
 }
 
 export function markDelivered(orderNsu) {
-  mutate((draft) => {
-    const order = draft.orders[orderNsu];
-    if (!order) return;
-    const timestamp = now();
+  mutate((database) => {
+    const order = database.orders[orderNsu];
+
+    if (!order) {
+      return;
+    }
+
     order.status = "DELIVERED";
-    order.joined_at = timestamp;
-    order.updated_at = timestamp;
+    order.joined_at =
+      order.joined_at ?? now();
+
+    order.updated_at = now();
   });
 }
 
 export function enqueuePaymentEvent(payload) {
-  const transactionNsu = String(payload.transaction_nsu ?? "");
-  const orderNsu = String(payload.order_nsu ?? "");
-  const current = state.paymentEvents[transactionNsu];
+  const txids = [
+    ...new Set(
+      (payload?.pix ?? [])
+        .map((pix) =>
+          String(pix.txid ?? "")
+        )
+        .filter(Boolean)
+    )
+  ];
 
-  if (current) return { inserted: false, event: clone(current) };
+  const createdEvents = [];
 
-  let created;
-  mutate((draft) => {
-    created = {
-      id: draft.nextEventId++,
-      transaction_nsu: transactionNsu,
-      order_nsu: orderNsu,
-      payload: JSON.stringify(payload),
-      status: "PENDING",
-      attempts: 0,
-      last_error: null,
-      created_at: now(),
-      processed_at: null
-    };
-    draft.paymentEvents[transactionNsu] = created;
+  mutate((database) => {
+    for (const txid of txids) {
+      const endToEndId =
+        payload.pix?.find(
+          (pix) => pix.txid === txid
+        )?.endToEndId ?? "";
+
+      const key = `${txid}:${endToEndId}`;
+
+      const alreadyExists =
+        Object.values(database.paymentEvents)
+          .some((event) => event.key === key);
+
+      if (alreadyExists) {
+        continue;
+      }
+
+      const id = database.nextEventId++;
+
+      const event = {
+        id,
+        key,
+        txid,
+        payload: JSON.stringify(payload),
+
+        status: "PENDING",
+        attempts: 0,
+        last_error: null,
+
+        created_at: now(),
+        processed_at: null
+      };
+
+      database.paymentEvents[id] = event;
+      createdEvents.push(event);
+    }
   });
 
-  return { inserted: true, event: clone(created) };
+  return clone(createdEvents);
 }
 
-export function listPendingEvents(limit = 10) {
+export function listPendingEvents(limit = 20) {
   return clone(
     Object.values(state.paymentEvents)
-      .filter(
-        (event) =>
-          ["PENDING", "RETRY", "PROCESSING"].includes(event.status) && event.attempts < 12
-      )
+      .filter((event) => {
+        return (
+          ["PENDING", "RETRY"].includes(event.status) &&
+          event.attempts < 10
+        );
+      })
       .sort((a, b) => a.id - b.id)
       .slice(0, limit)
   );
 }
 
-function mutateEventById(id, mutator) {
-  mutate((draft) => {
-    const event = Object.values(draft.paymentEvents).find((item) => item.id === id);
-    if (event) mutator(event);
+function mutateEvent(id, callback) {
+  mutate((database) => {
+    const event = database.paymentEvents[id];
+
+    if (event) {
+      callback(event);
+    }
   });
 }
 
 export function markEventProcessing(id) {
-  mutateEventById(id, (event) => {
+  mutateEvent(id, (event) => {
     event.status = "PROCESSING";
-    event.attempts += 1;
+    event.attempts++;
   });
 }
 
 export function markEventDone(id) {
-  mutateEventById(id, (event) => {
+  mutateEvent(id, (event) => {
     event.status = "DONE";
     event.processed_at = now();
     event.last_error = null;
@@ -289,34 +439,61 @@ export function markEventDone(id) {
 }
 
 export function markEventRetry(id, error) {
-  mutateEventById(id, (event) => {
+  mutateEvent(id, (event) => {
     event.status = "RETRY";
-    event.last_error = String(error).slice(0, 1000);
+    event.last_error =
+      String(error).slice(0, 1000);
   });
 }
 
-export function listPaidOrdersWithoutNotification(limit = 20) {
+export function listPaidOrdersWithoutNotification(
+  limit = 20
+) {
   return clone(
     Object.values(state.orders)
-      .filter((order) => order.status === "PAID" && !order.invite_notified_at)
-      .sort((a, b) => (a.paid_at ?? "").localeCompare(b.paid_at ?? ""))
+      .filter((order) => {
+        return (
+          order.status === "PAID" &&
+          !order.invite_notified_at
+        );
+      })
       .slice(0, limit)
   );
 }
 
 export function getStats() {
   const orders = Object.values(state.orders);
-  const paidOrders = orders.filter((order) => ["PAID", "DELIVERED"].includes(order.status));
+
+  const paidOrders = orders.filter((order) =>
+    ["PAID", "DELIVERED"].includes(order.status)
+  );
+
   return {
     users: Object.keys(state.users).length,
     orders: orders.length,
-    pending: orders.filter((order) => order.status === "PENDING").length,
+
+    pending: orders.filter(
+      (order) => order.status === "PENDING"
+    ).length,
+
     paid: paidOrders.length,
-    delivered: orders.filter((order) => order.status === "DELIVERED").length,
-    revenue_cents: paidOrders.reduce((total, order) => total + Number(order.amount_cents), 0)
+
+    delivered: orders.filter(
+      (order) => order.status === "DELIVERED"
+    ).length,
+
+    revenue_cents: paidOrders.reduce(
+      (total, order) =>
+        total + order.amount_cents,
+      0
+    )
   };
 }
 
 export function databaseHealthCheck() {
-  return Boolean(state && state.users && state.orders && state.paymentEvents);
+  return Boolean(
+    state?.users &&
+    state?.orders &&
+    state?.paymentEvents
+  );
 }
